@@ -11,6 +11,7 @@
 #include "bn_bg_palettes.h"
 #include "agbabi.h"
 #include "bn_sprite_text_generator.h"
+#include "bn_music_items.h"
 
 #include "common_info.h"
 #include "common_variable_8x16_sprite_font.h"
@@ -369,8 +370,10 @@ struct ClientStates {
             text_sprites.clear();
 
             text_generator.generate(0, -4 * 16, "Luigi's Lucky RTC", text_sprites);
-            text_generator.generate(0, -1 * 16, "You can hot-swap on this screen.", text_sprites);
-            text_generator.generate(0, +1 * 16, "Insert your desired hardware!", text_sprites);
+            text_generator.generate(0, -2 * 16, "You can hot-swap on this screen.", text_sprites);
+            text_generator.generate(0, +0 * 16, "Insert your desired hardware!", text_sprites);
+            text_generator.generate(0, +2 * 16, "Built with Butano, made by @aronson", text_sprites);
+            text_generator.generate(0, +3 * 16, "Music Credit: Nighthawk - Trams.xm", text_sprites);
             text_generator.generate(0, +4 * 16, "START: query RTC module", text_sprites);
         }
 
@@ -752,6 +755,7 @@ RtcClient::RtcClient() {
 
 int main() {
     bn::core::init();
+    bn::music_items::trams.play(1.0, true);
 
     RtcClient rtcClient;
     bn::bg_palettes::set_transparent_color(bn::color(16, 20, 16));
