@@ -574,7 +574,7 @@ struct ClientStates {
         }
 
         void SaveTime() const {
-            RtcClient::setRTC(year, month, day, (calculateDayOfWeekIndex(year, month, day) + dowOffset) % 7, hour,
+            RtcClient::setRTC(year, month, day, (calculateDayOfWeekIndex(year, month, day) + dowOffset + 7) % 7, hour,
                               minute, second);
         }
 
