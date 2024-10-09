@@ -17,3 +17,4 @@ build/
 *.cflags
 *.cxxflags
 compile_commands.json
+**/.DS_Store

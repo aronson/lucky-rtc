@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024 Isaac Aronson <i@pingas.org>
+ * Copyright (c) 2024 Isaac Aronson <i@pingas.org>
  * zlib License, see LICENSE file.
  */
 
@@ -50,7 +50,7 @@ public:
 private:
     StateMachine sm;
     friend struct ClientStates;
-    bool rtcStatus = false;
+    unsigned short rtcStatus = false;
 
     /**
      * Will set up the RTC module to read or write from other methods.
@@ -67,7 +67,7 @@ private:
             unsigned short reg_value = data_bit | 0b100;
 
             // Knock on module a few times before commiting write
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 2; i++)
                 REG_DAT = reg_value;
 
             // Send value plus LSB R/W bit to trigger flush
@@ -83,7 +83,7 @@ private:
         // Read 8 bits
         for (int bit = 0; bit < 8; bit++) {
             // Knock a few times on pin 3
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 2; i++)
                 REG_DAT = 0b100;
             // Raise R/W pin (1) after knocking
             REG_DAT = 0b101;
@@ -96,6 +96,9 @@ private:
         return data >> 1;
     }
 
+    /**
+     * Assuming proper signaling to the RTC module prior, will write out 8 bits to the module
+     */
     static void writeByte(int byte) {
         // Shift command up to avoid collision with LSB R/W bit
         byte <<= 1;
@@ -106,7 +109,7 @@ private:
             unsigned short reg_value = data_bit | 0b100;
 
             // Knock on module a few times before commiting read
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 2; i++)
                 REG_DAT = reg_value;
 
             // Send value plus LSB R/W bit to trigger flush
@@ -115,7 +118,7 @@ private:
     }
 
     /**
-     *
+     * Handles own signaling, commits full date and time to module
      */
     static void setRTC(int year, int month, int day, int dayOfWeek, int hour, int minute, int second) {
         int i;
@@ -141,6 +144,9 @@ private:
         }
     }
 
+    /**
+     * Handles own signaling, sends factory init signal to module
+     */
     static void resetChip() {
         // Wake up
         REG_DAT = 0b001;
@@ -150,12 +156,14 @@ private:
         REG_DIR = 0b111;
         // Send reset command
         commandRTC(MASK_READ(0));
-        // Knock read twice for luck
-        REG_DAT = 0b001;
+        // Knock read
         REG_DAT = 0b001;
     }
 
-    // Credit: Gericom
+    /**
+     * LUT for fast binary to BCD conversion
+     * Credit: Gericom
+     */
     static int toBcd(unsigned int value) {
         static const unsigned char sToBcd[100] =
                 {
@@ -202,8 +210,25 @@ bn::string<64> &getTimeString(bn::string<64> &text, const bn::optional<bn::time>
     return text;
 }
 
+// Zeller's Congruence algorithm
+[[nodiscard]] int calculateDayOfWeekIndex(int year, int month, int day) {
+    static constexpr int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    int y = year;
+
+    if (month < 3) {
+        y--;
+    }
+
+    // 100 and 400 div maybe not necessary...
+    return (y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7;
+}
+
+
 bn::string<64> &getDateString(bn::string<64> &text, const bn::optional<bn::date> &date) {
-    text += week_days[date->week_day()];
+    text += week_days[calculateDayOfWeekIndex(date->year(), date->month(), date->month_day())];
+    text += "(";
+    text += bn::to_string<1>(date->week_day());
+    text += ")";
     text += ' ';
     text += bn::to_string<4>(date->year());
     text += '/';
@@ -245,7 +270,6 @@ struct ClientStates {
 
     struct HelloRtc : BaseState {
         bn::vector<bn::sprite_ptr, 128> text_sprites;
-        int checkValue = 0;
 
         void OnEnter() override {
             text_sprites.clear();
@@ -263,7 +287,7 @@ struct ClientStates {
             // Relax direction 2nd pin to allow for reads
             REG_DIR = 0b101;
             // Read value from RTC assuming it's ready
-            checkValue = RtcClient::readByte();
+            int checkValue = RtcClient::readByte();
 
             // Report on result
             bn::string<64> text;
@@ -280,7 +304,7 @@ struct ClientStates {
                 nextSteps = "START: proceed to initialize";
             } else if (checkValue & 0x80) {
                 text = "RTC chip battery is (likely) dead.";
-                nextSteps = "START: proceed to read date & time";
+                nextSteps = "START: proceed to attempt init";
             } else if (checkValue & 0x40) {
                 text = "RTC chip is in 24 hour mode.";
                 nextSteps = "START: proceed to read date & time";
@@ -289,14 +313,14 @@ struct ClientStates {
                 nextSteps = "START: proceed to read date & time";
             }
             Owner().rtcStatus = checkValue;
-            text_generator.generate(0, -1 * 16, text, text_sprites);
-            text_generator.generate(0, +0 * 16, additional, text_sprites);
-            text_generator.generate(0, +1 * 16, additional2, text_sprites);
+            text_generator.generate(0, -0 * 16, text, text_sprites);
+            text_generator.generate(0, +1 * 16, additional, text_sprites);
+            text_generator.generate(0, +2 * 16, additional2, text_sprites);
             text_generator.generate(0, +4 * 16, nextSteps, text_sprites);
         }
 
         Transition GetTransition() override {
-            if (bn::keypad::start_pressed() && checkValue & 0x80) {
+            if (bn::keypad::start_pressed() && (Owner().rtcStatus & 0x80)) {
                 return SiblingTransition<ResetScene>();
             } else if (bn::keypad::start_pressed()) {
                 return SiblingTransition<DateTimeScene>();
@@ -382,7 +406,8 @@ struct ClientStates {
         };
         SelectedComponent selectedComponent = Year;
         bn::string<32> readLine;
-        int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+        int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, dow = 0;
+        int dowOffset = 0;
         bn::vector<bn::sprite_ptr, 64> text_sprites;
 
         void ReadFromRTC() {
@@ -397,6 +422,8 @@ struct ClientStates {
             hour = time.hour();
             minute = time.minute();
             second = time.second();
+            dow = date.week_day();
+            dowOffset = dow - calculateDayOfWeekIndex(year, month, day);
         }
 
         void OnEnter() override {
@@ -406,8 +433,6 @@ struct ClientStates {
             text_generator.generate(0, -4 * 16, "RTC Edit", text_sprites);
             text_generator.generate(0, 0 * 16, readLine, text_sprites);
             text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
-            text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
-            text_generator.generate(0, +4 * 16, "START: save", text_sprites);
             text_generator.generate(0, +4 * 16, "START: save", text_sprites);
         }
 
@@ -548,21 +573,9 @@ struct ClientStates {
             bn::core::update();
         }
 
-        // Zeller's Congruence algorithm
-        [[nodiscard]] int calculateDayOfWeekIndex() const {
-            static constexpr int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-            int y = year;
-
-            if (month < 3) {
-                y--;
-            }
-
-            // 100 and 400 div maybe not necessary...
-            return (y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7;
-        }
-
         void SaveTime() const {
-            RtcClient::setRTC(year, month, day, calculateDayOfWeekIndex(), hour, minute, second);
+            RtcClient::setRTC(year, month, day, (calculateDayOfWeekIndex(year, month, day) + dowOffset) % 7, hour,
+                              minute, second);
         }
 
         DEFINE_HSM_STATE(EditScene)
