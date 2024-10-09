@@ -9,10 +9,17 @@
 #include "bn_keypad.h"
 #include "bn_string.h"
 #include "bn_bg_palettes.h"
+#include "agbabi.h"
 #include "bn_sprite_text_generator.h"
 
 #include "common_info.h"
 #include "common_variable_8x16_sprite_font.h"
+
+alignas(int) __attribute__((used)) const char save_type[] = "FLASH1M_V102";
+
+const char *init() {
+    return save_type;
+}
 
 #define REG_DAT *((volatile uint16_t *)0x080000C4)
 #define REG_DIR *((volatile uint16_t *)0x080000C6)
@@ -25,6 +32,7 @@
 bn::sprite_text_generator text_generator(common::variable_8x16_sprite_font);
 
 #include "hsm.h"
+#include "../butano/butano/hw/include/bn_hw_gpio.h"
 
 static constexpr bn::string_view week_days[] = {
         "Sunday",
@@ -50,7 +58,8 @@ public:
 private:
     StateMachine sm;
     friend struct ClientStates;
-    unsigned short rtcStatus = false;
+    unsigned short rtcStatus = 0;
+    bool rtcFail = false;
 
     /**
      * Will set up the RTC module to read or write from other methods.
@@ -109,7 +118,7 @@ private:
             unsigned short reg_value = data_bit | 0b100;
 
             // Knock on module a few times before commiting read
-            for (int i = 0; i < 2; i++)
+            for (int i = 0; i < 5; i++)
                 REG_DAT = reg_value;
 
             // Send value plus LSB R/W bit to trigger flush
@@ -142,6 +151,36 @@ private:
         for (i = 4; i < 7; i++) {
             writeByte(toBcd(dataField[i]));
         }
+    }
+
+    static int readStatus() {
+        // We want to init the RTC without resetting it automatically, so skip butano and agbabi methods
+        REG_CTL = 0b001; // enable control of remote chip
+        // Most get this wrong and send dir first, but real games do the below
+        REG_DAT = 0b001; // raise first pin
+        REG_DAT = 0b101; // raise third pin while first still high
+        // We've banged the bus a little to say hello, now we enable direction and flow that data to the chip
+        REG_DIR = 0b111; // raise/commit all three pins
+        // Now the RTC is theoretically ready so we tell it to give us its status
+        RtcClient::commandRTC(MASK_READ(1));
+        // Relax direction 2nd pin to allow for reads
+        REG_DIR = 0b101;
+        // Read value from RTC assuming it's ready
+        int checkValue = RtcClient::readByte();
+        return checkValue;
+    }
+
+    static void writeStatus(unsigned short status) {
+        // Enable control
+        REG_CTL = 0b001;
+        // Knock data pins 1 and 3
+        REG_DAT = 0b001;
+        REG_DAT = 0b101;
+        // Set dir to all out
+        REG_DIR = 0b111;
+        // Inform RTC we intend to write status (write command 1)
+        commandRTC(MASK_WRITE(1));
+        writeByte(status);
     }
 
     /**
@@ -249,8 +288,8 @@ struct ClientStates {
             text_sprites.clear();
 
             text_generator.generate(0, -4 * 16, "Luigi's Lucky RTC", text_sprites);
-            text_generator.generate(0, -1 * 16, "This program supports hot-swap.", text_sprites);
-            text_generator.generate(0, -0 * 16, "Insert your desired hardware!", text_sprites);
+            text_generator.generate(0, -1 * 16, "You can hot-swap on this screen.", text_sprites);
+            text_generator.generate(0, +1 * 16, "Insert your desired hardware!", text_sprites);
             text_generator.generate(0, +4 * 16, "START: query RTC module", text_sprites);
         }
 
@@ -274,31 +313,21 @@ struct ClientStates {
         void OnEnter() override {
             text_sprites.clear();
             text_generator.generate(0, -4 * 16, "Negotiation with RTC module", text_sprites);
-
-            // We want to init the RTC without resetting it automatically, so skip butano and agbabi methods
-            REG_CTL = 0b001; // enable control of remote chip
-            // Most get this wrong and send dir first, but real games do the below
-            REG_DAT = 0b001; // raise first pin
-            REG_DAT = 0b101; // raise third pin while first still high
-            // We've banged the bus a little to say hello, now we enable direction and flow that data to the chip
-            REG_DIR = 0b111; // raise/commit all three pins
-            // Now the RTC is theoretically ready so we tell it to give us its status
-            RtcClient::commandRTC(MASK_READ(1));
-            // Relax direction 2nd pin to allow for reads
-            REG_DIR = 0b101;
-            // Read value from RTC assuming it's ready
-            int checkValue = RtcClient::readByte();
+            int checkValue = RtcClient::readStatus();
 
             // Report on result
             bn::string<64> text;
             bn::string<64> additional;
             bn::string<64> additional2;
             bn::string<64> nextSteps;
+            int offset = 0;
+            Owner().rtcFail = false;
             if (checkValue == 0xFF) {
                 text = "RTC chip returned only noise.";
-                additional = "Bad/misconfigured emu?";
-                additional2 = "Cart not plugged?";
+                additional = "Cart not plugged?";
+                additional2 = "Inaccurate/misconfigured emu?";
                 nextSteps = "START: proceed to attempt reset";
+                offset = -1;
             } else if (checkValue == 0x82) {
                 text = "RTC chip is in factory state.";
                 nextSteps = "START: proceed to initialize";
@@ -309,18 +338,32 @@ struct ClientStates {
                 text = "RTC chip is in 24 hour mode.";
                 nextSteps = "START: proceed to read date & time";
             } else {
-                text = "RTC chip is in 12 hour mode.";
-                nextSteps = "START: proceed to read date & time";
+                // 12h is suspicious...
+                auto agbabiRtcDatetime = __agbabi_rtc_datetime();
+                if (!__agbabi_rtc_time() && !agbabiRtcDatetime[0] && !agbabiRtcDatetime[1]) {
+                    text = "RTC chip sent no data.";
+                    additional = "Cart has no RTC?";
+                    additional2 = "Inaccurate/misconfigured emu?";
+                    nextSteps = "START: proceed to attempt init";
+                    offset = -1;
+                    Owner().rtcFail = true;
+                } else {
+                    text = "RTC chip is in 12 hour mode.";
+                    nextSteps = "START: proceed to read date & time";
+                }
             }
             Owner().rtcStatus = checkValue;
-            text_generator.generate(0, -0 * 16, text, text_sprites);
-            text_generator.generate(0, +1 * 16, additional, text_sprites);
-            text_generator.generate(0, +2 * 16, additional2, text_sprites);
+            text_generator.generate(0, (-0 + offset) * 16, text, text_sprites);
+            text_generator.generate(0, (+1 + offset) * 16, additional, text_sprites);
+            text_generator.generate(0, (+2 + offset) * 16, additional2, text_sprites);
+            text_generator.generate(0, +3 * 16, "SELECT: back to hotswap screen", text_sprites);
             text_generator.generate(0, +4 * 16, nextSteps, text_sprites);
         }
 
         Transition GetTransition() override {
-            if (bn::keypad::start_pressed() && (Owner().rtcStatus & 0x80)) {
+            if (bn::keypad::select_pressed()) {
+                return SiblingTransition<WelcomeScene>();
+            } else if (bn::keypad::start_pressed() && (Owner().rtcStatus & 0x80 || Owner().rtcFail)) {
                 return SiblingTransition<ResetScene>();
             } else if (bn::keypad::start_pressed()) {
                 return SiblingTransition<WallClockScene>();
@@ -336,13 +379,24 @@ struct ClientStates {
     };
 
     struct WallClockScene : BaseState {
-        bn::vector<bn::sprite_ptr, 96> text_sprites;
-        bn::vector<bn::sprite_ptr, 32> time_sprites;
+        bn::vector<bn::sprite_ptr, 64> text_sprites;
+        bn::vector<bn::sprite_ptr, 33> afternoon_sprites;
+        bn::vector<bn::sprite_ptr, 31> time_sprites;
+        bool workedOnce = false;
+        int status = 0;
 
         void OnEnter() override {
-            if (!bn::date::active() || !bn::time::active()) {
+            status = Owner().rtcStatus;
+            auto agbabiRtcDatetime = __agbabi_rtc_datetime();
+            if (!__agbabi_rtc_time() && !agbabiRtcDatetime[0] && !agbabiRtcDatetime[1]) {
+                Owner().rtcFail = true;
                 return;
             }
+            workedOnce = true;
+            render();
+        }
+
+        void render() {
             text_sprites.clear();
             text_generator.generate(0, -4 * 16, "Read Date and Time", text_sprites);
             if (bn::date::active() && bn::time::active()) {
@@ -355,26 +409,55 @@ struct ClientStates {
 
         void Update() override {
             bn::string<64> text;
+            Owner().rtcFail = false;
 
             if (bn::optional<bn::date> date = bn::date::current()) {
                 text = getDateString(text, date);
             } else {
+                Owner().rtcFail = true;
                 return;
             }
 
             if (bn::optional<bn::time> time = bn::time::current()) {
                 text = getTimeString(text, time);
             } else {
+                Owner().rtcFail = true;
                 return;
             }
 
+            if (bn::keypad::r_pressed()) {
+                if (status & 0x40) {
+                    status = 0x00;
+                } else {
+                    status = 0x40;
+                }
+                RtcClient::writeStatus(status);
+
+                Owner().rtcStatus = RtcClient::readStatus();
+            }
+
+            bn::string<33> afternoon = "R: toggle 12/24h (currently: ";
+            afternoon += (Owner().rtcStatus & 0x40 ? "24h" : "12h");
+            afternoon += ")";
+            afternoon_sprites.clear();
+            text_generator.generate(0, 2 * 16, afternoon, afternoon_sprites);
+
+            if (status != Owner().rtcStatus) {
+                text_sprites.clear();
+                render();
+                text_generator.generate(0, 1 * 16, "Module rejected status write...", text_sprites);
+            }
             time_sprites.clear();
             text_generator.generate(0, 0, text, time_sprites);
         }
 
         Transition GetTransition() override {
-            if (!bn::date::active() || !bn::time::active()) {
-                return SiblingTransition<StatusScene>();
+            if (Owner().rtcFail) {
+                if (workedOnce) {
+                    return SiblingTransition<WelcomeScene>();
+                } else {
+                    return SiblingTransition<StatusScene>();
+                }
             } else if (bn::keypad::select_pressed()) {
                 return SiblingTransition<ResetScene>();
             } else if (bn::keypad::start_pressed() && bn::date::active() && bn::time::active()) {
@@ -384,6 +467,7 @@ struct ClientStates {
         }
 
         void OnExit() override {
+            Owner().rtcFail = false;
             bn::core::update();
         }
 
@@ -580,7 +664,11 @@ struct ClientStates {
         bn::string<35> description;
 
         void OnEnter() override {
-            description = Owner().rtcStatus & 0x80 ? "RTC power flag raised: init?" : "RTC ready: confirm reset?";
+            description = Owner().rtcStatus & 0x80 ?
+                          "RTC power flag raised: init?" :
+                          Owner().rtcFail ?
+                          "RTC not found: attempt reset?" :
+                          "RTC ready: confirm reset?";
             text_sprites.clear();
             text_generator.generate(0, -4 * 16, Owner().rtcStatus == 0x82 ? "RTC Initialize" : "RTC Reset",
                                     text_sprites);
