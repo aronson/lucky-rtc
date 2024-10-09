@@ -15,11 +15,76 @@
 #include "common_info.h"
 #include "common_variable_8x16_sprite_font.h"
 
+#include "hsm.h"
+
 alignas(int) __attribute__((used)) const char save_type[] = "FLASH1M_V102";
 
 const char *init() {
     return save_type;
 }
+
+class TimeFormatter {
+private:
+    bn::string<32> readLine;
+    int year, month, day, hour, minute, second;
+    bool afternoon;
+    int selectedComponent;
+    int rtcStatus;
+
+    static bn::string<2> formatNumber(int num) {
+        bn::string<2> result = bn::to_string<2>(num);
+        if (result.length() < 2) {
+            result = bn::string<2>(2 - result.length(), '0') + result;
+        }
+        return result;
+    }
+
+    void addComponent(const bn::string<33> &value, int component) {
+        if (selectedComponent == component) readLine += "<";
+        readLine += value;
+        if (selectedComponent == component) readLine += ">";
+    }
+
+public:
+    enum Component {
+        Year, Month, Day, Hour, Minute, Second, Afternoon
+    };
+
+    TimeFormatter(int y, int mo, int d, int h, int mi, int s, bool pm, int selected, int status)
+            : year(y), month(mo), day(d), hour(h), minute(mi), second(s),
+              afternoon(pm), selectedComponent(selected), rtcStatus(status) {}
+
+    bn::string<33> renderLine() {
+        readLine.clear();
+
+        addComponent(formatNumber(year), Year);
+        readLine += "/";
+        addComponent(formatNumber(month), Month);
+        readLine += "/";
+        addComponent(formatNumber(day), Day);
+        readLine += " ";
+
+        if (!(rtcStatus & 0x40)) {
+            int displayHour = hour % 12;
+            if (displayHour == 0) displayHour = 12;
+            addComponent(formatNumber(displayHour), Hour);
+        } else {
+            addComponent(formatNumber(hour), Hour);
+        }
+
+        readLine += ":";
+        addComponent(formatNumber(minute), Minute);
+        readLine += ":";
+        addComponent(formatNumber(second), Second);
+
+        if (!(rtcStatus & 0x40)) {
+            readLine += " ";
+            addComponent(afternoon ? "PM" : "AM", Afternoon);
+        }
+
+        return readLine;
+    }
+};
 
 #define REG_DAT *((volatile uint16_t *)0x080000C4)
 #define REG_DIR *((volatile uint16_t *)0x080000C6)
@@ -30,9 +95,6 @@ const char *init() {
 #define MASK_WRITE(x) (((x)<<1) | 0x60)
 
 bn::sprite_text_generator text_generator(common::variable_8x16_sprite_font);
-
-#include "hsm.h"
-#include "../butano/butano/hw/include/bn_hw_gpio.h"
 
 static constexpr bn::string_view week_days[] = {
         "Sunday",
@@ -129,12 +191,13 @@ private:
     /**
      * Handles own signaling, commits full date and time to module
      */
-    static void setRTC(int year, int month, int day, int dayOfWeek, int hour, int minute, int second) {
+    static void setRTC(int year, int month, int day, int dayOfWeek, int hour, int minute, int second, bool afternoon) {
         int i;
         unsigned char dataField[7]{static_cast<unsigned char>(year), static_cast<unsigned char>(month),
                                    static_cast<unsigned char>(day), static_cast<unsigned char>(dayOfWeek),
                                    static_cast<unsigned char>(hour), static_cast<unsigned char>(minute),
                                    static_cast<unsigned char>(second)};
+
         // Enable control
         REG_CTL = 0b001;
         // Knock data pins 1 and 3
@@ -149,6 +212,14 @@ private:
             writeByte(toBcd(dataField[i]));
         }
         for (i = 4; i < 7; i++) {
+            // AM/PM flag
+            if (i == 4) {
+                int result = toBcd(dataField[i]);
+                if (afternoon)
+                    result += 0b10000000;
+                writeByte(result);
+                continue;
+            }
             writeByte(toBcd(dataField[i]));
         }
     }
@@ -223,8 +294,14 @@ private:
 
 };
 
-bn::string<64> &getTimeString(bn::string<64> &text, const bn::optional<bn::time> &time) {
-    bn::string<4> hour = bn::to_string<4>(time->hour());
+bn::string<64> &getTimeString(bn::string<64> &text, const bn::optional<bn::time> &time, bool twelveHourMode) {
+    int stagingHour = time->hour();
+    if (twelveHourMode) {
+        stagingHour %= 12;
+        if (stagingHour == 0)
+            stagingHour = 12;
+    }
+    bn::string<4> hour = bn::to_string<4>(stagingHour);
     bn::string<4> minute = bn::to_string<4>(time->minute());
     bn::string<4> second = bn::to_string<4>(time->second());
 
@@ -246,6 +323,10 @@ bn::string<64> &getTimeString(bn::string<64> &text, const bn::optional<bn::time>
     text += minute;
     text += ':';
     text += second;
+    if (twelveHourMode) {
+        text += " ";
+        text += time->hour() >= 12 ? "PM" : "AM";
+    }
     return text;
 }
 
@@ -400,30 +481,17 @@ struct ClientStates {
             text_sprites.clear();
             text_generator.generate(0, -4 * 16, "Read Date and Time", text_sprites);
             if (bn::date::active() && bn::time::active()) {
-                text_generator.generate(0, 3 * 16, "SELECT: reset (will confirm first)", text_sprites);
-                text_generator.generate(0, 4 * 16, "START: edit (saves current time)", text_sprites);
+                text_generator.generate(0, -2 * 16, "You can hotswap on this screen!", text_sprites);
+                text_generator.generate(0, +3 * 16, "SELECT: reset (will confirm first)", text_sprites);
+                text_generator.generate(0, +4 * 16, "START: edit (saves current time)", text_sprites);
             } else {
-                text_generator.generate(0, 4 * 16, "SELECT: proceed to attempt reset", text_sprites);
+                text_generator.generate(0, +4 * 16, "SELECT: proceed to attempt reset", text_sprites);
             }
         }
 
         void Update() override {
             bn::string<64> text;
             Owner().rtcFail = false;
-
-            if (bn::optional<bn::date> date = bn::date::current()) {
-                text = getDateString(text, date);
-            } else {
-                Owner().rtcFail = true;
-                return;
-            }
-
-            if (bn::optional<bn::time> time = bn::time::current()) {
-                text = getTimeString(text, time);
-            } else {
-                Owner().rtcFail = true;
-                return;
-            }
 
             if (bn::keypad::r_pressed()) {
                 if (status & 0x40) {
@@ -447,6 +515,21 @@ struct ClientStates {
                 render();
                 text_generator.generate(0, 1 * 16, "Module rejected status write...", text_sprites);
             }
+
+            if (bn::optional<bn::date> date = bn::date::current()) {
+                text = getDateString(text, date);
+            } else {
+                Owner().rtcFail = true;
+                return;
+            }
+
+            if (bn::optional<bn::time> time = bn::time::current()) {
+                text = getTimeString(text, time, !(Owner().rtcStatus & 0x40));
+            } else {
+                Owner().rtcFail = true;
+                return;
+            }
+
             time_sprites.clear();
             text_generator.generate(0, 0, text, time_sprites);
         }
@@ -454,6 +537,7 @@ struct ClientStates {
         Transition GetTransition() override {
             if (Owner().rtcFail) {
                 if (workedOnce) {
+                    // Hotswap
                     return SiblingTransition<WelcomeScene>();
                 } else {
                     return SiblingTransition<StatusScene>();
@@ -475,17 +559,10 @@ struct ClientStates {
     };
 
     struct EditScene : BaseState {
-        enum SelectedComponent {
-            Year,
-            Month,
-            Day,
-            Hour,
-            Minute,
-            Second
-        };
-        SelectedComponent selectedComponent = Year;
-        bn::string<32> readLine;
+        TimeFormatter::Component selectedComponent = TimeFormatter::Component::Year;
+        bn::string_view readLine;
         int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, dow = 0;
+        bool afternoon = false;
         int dowOffset = 0;
         bn::vector<bn::sprite_ptr, 96> text_sprites;
         bn::vector<bn::sprite_ptr, 32> time_sprites;
@@ -503,57 +580,22 @@ struct ClientStates {
             minute = time.minute();
             second = time.second();
             dow = date.week_day();
+            afternoon = time.hour() >= 12;
             dowOffset = dow - calculateDayOfWeekIndex(year, month, day);
+            Owner().rtcStatus = RtcClient::readStatus();
         }
 
         void OnEnter() override {
             text_sprites.clear();
             time_sprites.clear();
             ReadFromRTC();
-            renderLine();
+            TimeFormatter formatter(year, month, day, hour, minute, second, afternoon, selectedComponent,
+                                    Owner().rtcStatus);
+            readLine = formatter.renderLine();
             text_generator.generate(0, -4 * 16, "RTC Edit", text_sprites);
             text_generator.generate(0, 0 * 16, readLine, time_sprites);
             text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
             text_generator.generate(0, +4 * 16, "START: save", text_sprites);
-        }
-
-        void renderLine() {
-            readLine = "";
-            if (selectedComponent == Year)
-                readLine += "<";
-            readLine += bn::to_string<2>(year);
-            if (selectedComponent == Year)
-                readLine += ">";
-            readLine += "/";
-            if (selectedComponent == Month)
-                readLine += "<";
-            readLine += bn::to_string<2>(month);
-            if (selectedComponent == Month)
-                readLine += ">";
-            readLine += "/";
-            if (selectedComponent == Day)
-                readLine += "<";
-            readLine += bn::to_string<2>(day);
-            if (selectedComponent == Day)
-                readLine += ">";
-            readLine += " ";
-            if (selectedComponent == Hour)
-                readLine += "<";
-            readLine += bn::to_string<2>(hour);
-            if (selectedComponent == Hour)
-                readLine += ">";
-            readLine += ":";
-            if (selectedComponent == Minute)
-                readLine += "<";
-            readLine += bn::to_string<2>(minute);
-            if (selectedComponent == Minute)
-                readLine += ">";
-            readLine += ":";
-            if (selectedComponent == Second)
-                readLine += "<";
-            readLine += bn::to_string<2>(second);
-            if (selectedComponent == Second)
-                readLine += ">";
         }
 
         void Update() override {
@@ -561,40 +603,43 @@ struct ClientStates {
             // Select component
             if (bn::keypad::left_pressed()) {
                 dirty = true;
-                if (selectedComponent != Year)
-                    selectedComponent = static_cast<SelectedComponent>(selectedComponent - 1);
+                if (selectedComponent != TimeFormatter::Component::Year)
+                    selectedComponent = static_cast<TimeFormatter::Component>(selectedComponent - 1);
             } else if (bn::keypad::right_pressed()) {
                 dirty = true;
-                if (selectedComponent != Second)
-                    selectedComponent = static_cast<SelectedComponent>(selectedComponent + 1);
+                if (selectedComponent != TimeFormatter::Component::Afternoon)
+                    selectedComponent = static_cast<TimeFormatter::Component>(selectedComponent + 1);
             }
             // Mutate component
             if (bn::keypad::up_pressed()) {
                 dirty = true;
                 switch (selectedComponent) {
-                    case Year:
+                    case TimeFormatter::Component::Year:
                         year++;
                         year %= 99;
                         break;
-                    case Month:
+                    case TimeFormatter::Component::Month:
                         month++;
                         month %= 99;
                         break;
-                    case Day:
+                    case TimeFormatter::Component::Day:
                         day++;
                         day %= 99;
                         break;
-                    case Hour:
+                    case TimeFormatter::Component::Hour:
                         hour++;
                         hour %= 99;
                         break;
-                    case Minute:
+                    case TimeFormatter::Component::Minute:
                         minute++;
                         minute %= 99;
                         break;
-                    case Second:
+                    case TimeFormatter::Component::Second:
                         second++;
                         second %= 99;
+                        break;
+                    case TimeFormatter::Component::Afternoon:
+                        afternoon = !afternoon;
                         break;
                     default:
                         break;
@@ -602,36 +647,41 @@ struct ClientStates {
             } else if (bn::keypad::down_pressed()) {
                 dirty = true;
                 switch (selectedComponent) {
-                    case Year:
+                    case TimeFormatter::Component::Year:
                         year--;
                         if (year < 0) year = 0;
                         break;
-                    case Month:
+                    case TimeFormatter::Component::Month:
                         month--;
                         if (month < 0) month = 0;
                         break;
-                    case Day:
+                    case TimeFormatter::Component::Day:
                         day--;
                         if (day < 0) day = 0;
                         break;
-                    case Hour:
+                    case TimeFormatter::Component::Hour:
                         hour--;
                         if (hour < 0) hour = 0;
                         break;
-                    case Minute:
+                    case TimeFormatter::Component::Minute:
                         minute--;
                         if (minute < 0) minute = 0;
                         break;
-                    case Second:
+                    case TimeFormatter::Component::Second:
                         second--;
                         if (second < 0) second = 0;
+                        break;
+                    case TimeFormatter::Component::Afternoon:
+                        afternoon = !afternoon;
                         break;
                     default:
                         break;
                 }
             }
             if (dirty) {
-                renderLine();
+                TimeFormatter formatter(year, month, day, hour, minute, second, afternoon, selectedComponent,
+                                        Owner().rtcStatus);
+                readLine = formatter.renderLine();
                 time_sprites.clear();
                 text_generator.generate(0, 0 * 16, readLine, time_sprites);
             }
@@ -653,7 +703,7 @@ struct ClientStates {
 
         void SaveTime() const {
             RtcClient::setRTC(year, month, day, (calculateDayOfWeekIndex(year, month, day) + dowOffset + 7) % 7, hour,
-                              minute, second);
+                              minute, second, afternoon);
         }
 
         DEFINE_HSM_STATE(EditScene)
