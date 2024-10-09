@@ -580,11 +580,13 @@ struct ClientStates {
         bn::string<35> description;
 
         void OnEnter() override {
-            description = !(Owner().rtcStatus & 0x80) ? "RTC ready: confirm reset?" : "RTC power flag raised: reset?";
+            description = Owner().rtcStatus & 0x80 ? "RTC power flag raised: init?" : "RTC ready: confirm reset?";
             text_sprites.clear();
-            text_generator.generate(0, -4 * 16, "RTC Reset", text_sprites);
+            text_generator.generate(0, -4 * 16, Owner().rtcStatus == 0x82 ? "RTC Initialize" : "RTC Reset",
+                                    text_sprites);
             text_generator.generate(0, +0 * 16, description, text_sprites);
-            text_generator.generate(0, +3 * 16, "SELECT: send reset", text_sprites);
+            text_generator.generate(0, +3 * 16, Owner().rtcStatus == 0x82 ? "SELECT: send init" : "SELECT: send reset",
+                                    text_sprites);
             text_generator.generate(0, +4 * 16, "START: force read RTC", text_sprites);
         }
 
