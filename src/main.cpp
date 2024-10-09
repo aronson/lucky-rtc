@@ -50,7 +50,7 @@ public:
 private:
     StateMachine sm;
     friend struct ClientStates;
-    bool rtcOk = false;
+    bool rtcStatus = false;
 
     /**
      * Will set up the RTC module to read or write from other methods.
@@ -218,16 +218,15 @@ struct ClientStates {
     };
 
     struct Welcome : BaseState {
-        static constexpr bn::string_view info_text_lines[] = {
-                "This program supports hot-swap:",
-                "Insert your desired hardware!",
-                "",
-                "Press START: query RTC module"
-        };
-        common::info info = common::info("Luigi's Lucky RTC", info_text_lines, text_generator);
+        bn::vector<bn::sprite_ptr, 128> text_sprites;
 
-        void Update() override {
-            info.update();
+        void OnEnter() override {
+            text_sprites.clear();
+
+            text_generator.generate(0, -4 * 16, "Luigi's Lucky RTC", text_sprites);
+            text_generator.generate(0, -1 * 16, "This program supports hot-swap.", text_sprites);
+            text_generator.generate(0, -0 * 16, "Insert your desired hardware!", text_sprites);
+            text_generator.generate(0, +4 * 16, "START: query RTC module", text_sprites);
         }
 
         Transition GetTransition() override {
@@ -245,16 +244,12 @@ struct ClientStates {
     };
 
     struct HelloRtc : BaseState {
-        bn::vector<bn::sprite_ptr, 32> text_sprites;
-        static constexpr bn::string_view info_text_lines[] = {
-                "START: proceed to next step"
-        };
-        common::info info = common::info("Negotiating with RTC module", info_text_lines, text_generator);
+        bn::vector<bn::sprite_ptr, 128> text_sprites;
         int checkValue = 0;
 
         void OnEnter() override {
-            // Be polite to framework
             text_sprites.clear();
+            text_generator.generate(0, -4 * 16, "Negotiation with RTC module", text_sprites);
 
             // We want to init the RTC without resetting it automatically, so skip butano and agbabi methods
             REG_CTL = 0b001; // enable control of remote chip
@@ -272,24 +267,36 @@ struct ClientStates {
 
             // Report on result
             bn::string<64> text;
+            bn::string<64> additional;
+            bn::string<64> additional2;
+            bn::string<64> nextSteps;
             if (checkValue == 0xFF) {
-                text = "RTC chip returned garbage; bad emu?";
+                text = "RTC chip returned only noise.";
+                additional = "Bad/misconfigured emu?";
+                additional2 = "Cart not plugged?";
+                nextSteps = "START: proceed to attempt reset";
             } else if (checkValue == 0x82) {
                 text = "RTC chip is in factory state.";
+                nextSteps = "START: proceed to initialize";
             } else if (checkValue & 0x80) {
                 text = "RTC chip battery is (likely) dead.";
+                nextSteps = "START: proceed to read date & time";
             } else if (checkValue & 0x40) {
                 text = "RTC chip is in 24 hour mode.";
+                nextSteps = "START: proceed to read date & time";
             } else {
                 text = "RTC chip is in 12 hour mode.";
+                nextSteps = "START: proceed to read date & time";
             }
-            Owner().rtcOk = !(checkValue & 0x80);
-            text_generator.generate(0, 0, text, text_sprites);
-            info.update();
+            Owner().rtcStatus = checkValue;
+            text_generator.generate(0, -1 * 16, text, text_sprites);
+            text_generator.generate(0, +0 * 16, additional, text_sprites);
+            text_generator.generate(0, +1 * 16, additional2, text_sprites);
+            text_generator.generate(0, +4 * 16, nextSteps, text_sprites);
         }
 
         Transition GetTransition() override {
-            if (bn::keypad::start_pressed() && checkValue & 0x82) {
+            if (bn::keypad::start_pressed() && checkValue & 0x80) {
                 return SiblingTransition<ResetScene>();
             } else if (bn::keypad::start_pressed()) {
                 return SiblingTransition<DateTimeScene>();
@@ -305,47 +312,53 @@ struct ClientStates {
     };
 
     struct DateTimeScene : BaseState {
-        bn::vector<bn::sprite_ptr, 16> text_sprites;
-        common::info info = common::info("Date and Time", info_text_lines, text_generator);
+        bn::vector<bn::sprite_ptr, 96> text_sprites;
+        bn::vector<bn::sprite_ptr, 32> time_sprites;
 
-        static constexpr bn::string_view info_text_lines[] = {
-                "SELECT: reset; START: edit"
-        };
+        void OnEnter() override {
+            text_sprites.clear();
+            text_generator.generate(0, -4 * 16, "Read Date and Time", text_sprites);
+            if (bn::date::active() && bn::time::active()) {
+                text_generator.generate(0, 3 * 16, "SELECT: reset (will confirm first)", text_sprites);
+                text_generator.generate(0, 4 * 16, "START: edit (saves current time)", text_sprites);
+            } else {
+                text_generator.generate(0, 4 * 16, "SELECT: proceed to attempt reset", text_sprites);
+            }
+        }
 
         void Update() override {
             bn::string<64> text;
-            text_sprites.clear();
+            time_sprites.clear();
 
             if (bn::date::active()) {
                 if (bn::optional<bn::date> date = bn::date::current()) {
                     text = getDateString(text, date);
                 } else {
-                    text = "Invalid RTC date";
+                    return;
                 }
             } else {
-                text = "RTC not present";
+                return;
             }
 
             if (bn::time::active()) {
                 if (bn::optional<bn::time> time = bn::time::current()) {
                     text = getTimeString(text, time);
-
                 } else {
-                    text = "Invalid RTC time";
+                    return;
                 }
             } else {
-                text = "RTC not present";
+                return;
             }
 
-            text_generator.generate(0, 0, text, text_sprites);
-
-            info.update();
+            text_generator.generate(0, 0, text, time_sprites);
         }
 
         Transition GetTransition() override {
-            if (bn::keypad::select_pressed()) {
+            if (!bn::date::active() || !bn::time::active()) {
+                return SiblingTransition<HelloRtc>();
+            } else if (bn::keypad::select_pressed()) {
                 return SiblingTransition<ResetScene>();
-            } else if (bn::keypad::start_pressed()) {
+            } else if (bn::keypad::start_pressed() && bn::date::active() && bn::time::active()) {
                 return SiblingTransition<EditScene>();
             }
             return NoTransition();
@@ -371,7 +384,6 @@ struct ClientStates {
         bn::string<32> readLine;
         int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
         bn::vector<bn::sprite_ptr, 64> text_sprites;
-        bn::sprite_text_generator::alignment_type previousAlignment{};
 
         void ReadFromRTC() {
             bn::optional<bn::date> dateOpt = bn::date::current();
@@ -389,13 +401,14 @@ struct ClientStates {
 
         void OnEnter() override {
             text_sprites.clear();
-            previousAlignment = text_generator.alignment();
-            text_generator.set_center_alignment();
             ReadFromRTC();
             renderLine();
             text_generator.generate(0, -4 * 16, "RTC Edit", text_sprites);
             text_generator.generate(0, 0 * 16, readLine, text_sprites);
-            text_generator.generate(0, 4 * 16, "SELECT: save; START: return", text_sprites);
+            text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
+            text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
+            text_generator.generate(0, +4 * 16, "START: save", text_sprites);
+            text_generator.generate(0, +4 * 16, "START: save", text_sprites);
         }
 
         void renderLine() {
@@ -515,8 +528,9 @@ struct ClientStates {
                 renderLine();
                 text_sprites.clear();
                 text_generator.generate(0, -4 * 16, "RTC Edit", text_sprites);
-                text_generator.generate(0, 0 * 16, readLine, text_sprites);
-                text_generator.generate(0, 4 * 16, "START: save; SELECT: return", text_sprites);
+                text_generator.generate(0, +0 * 16, readLine, text_sprites);
+                text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
+                text_generator.generate(0, +4 * 16, "START: save", text_sprites);
             }
         }
 
@@ -531,7 +545,6 @@ struct ClientStates {
         }
 
         void OnExit() override {
-            text_generator.set_alignment(previousAlignment);
             bn::core::update();
         }
 
@@ -556,24 +569,22 @@ struct ClientStates {
     };
 
     struct ResetScene : BaseState {
-        bn::vector<bn::sprite_ptr, 35> text_sprites;
-        static constexpr bn::string_view info_text_lines[] = {
-                "SELECT: send reset; START: read RTC"
-        };
-        common::info info = common::info("RTC Reset", info_text_lines, text_generator);
+        bn::vector<bn::sprite_ptr, 128> text_sprites;
         bn::string<35> description;
 
         void OnEnter() override {
-            description = Owner().rtcOk ? "RTC ready: confirm reset" : "RTC in bad or factory state: reset?";
+            description = !(Owner().rtcStatus & 0x80) ? "RTC ready: confirm reset?" : "RTC power flag raised: reset?";
             text_sprites.clear();
-            text_generator.generate(0, 0, description, text_sprites);
-            info.update();
+            text_generator.generate(0, -4 * 16, "RTC Reset", text_sprites);
+            text_generator.generate(0, +0 * 16, description, text_sprites);
+            text_generator.generate(0, +3 * 16, "SELECT: send reset", text_sprites);
+            text_generator.generate(0, +4 * 16, "START: force read RTC", text_sprites);
         }
 
         Transition GetTransition() override {
             if (bn::keypad::select_pressed()) {
                 RtcClient::resetChip();
-                return SiblingTransition<DateTimeScene>();
+                return SiblingTransition<HelloRtc>();
             } else if (bn::keypad::start_pressed()) {
                 return SiblingTransition<DateTimeScene>();
             }
@@ -596,7 +607,8 @@ int main() {
     bn::core::init();
 
     RtcClient rtcClient;
-    bn::bg_palettes::set_transparent_color(bn::color(16, 16, 16));
+    bn::bg_palettes::set_transparent_color(bn::color(16, 20, 16));
+    text_generator.set_center_alignment();
 
     while (true) {
         rtcClient.Update();
