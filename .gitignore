@@ -1,5 +1,6 @@
 build/
 .vscode/
+.idea/
 .qtc_clangd/
 *.gba
 *.elf
@@ -15,3 +16,4 @@ build/
 *.config
 *.cflags
 *.cxxflags
+compile_commands.json
