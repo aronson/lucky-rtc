@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate release notes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.split('/').at(-1);
+            github.rest.repos.createRelease({
+              name: `Release ${tag}`,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              generate_release_notes: true
+            })
+
+  build-release:
+    runs-on: ubuntu-latest
+    name: Build GBA ROM and add it to the release
+    needs: create-release
+    container:
+      image: niceluigi/apotris-dka
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+      - name: Make
+        run: make -j$(nproc)
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          file: lucky-rtc_mb.gba
+          file_glob: false
