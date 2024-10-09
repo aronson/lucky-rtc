@@ -619,8 +619,9 @@ int main() {
     bn::bg_palettes::set_transparent_color(bn::color(16, 20, 16));
     text_generator.set_center_alignment();
 
-    while (true) {
+    while (!(bn::keypad::start_held() && bn::keypad::select_held() && bn::keypad::a_held() && bn::keypad::b_held())) {
         rtcClient.Update();
         bn::core::update();
     }
+    return 0;
 }
