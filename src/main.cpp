@@ -242,7 +242,7 @@ struct ClientStates {
     struct BaseState : StateWithOwner<RtcClient> {
     };
 
-    struct Welcome : BaseState {
+    struct WelcomeScene : BaseState {
         bn::vector<bn::sprite_ptr, 128> text_sprites;
 
         void OnEnter() override {
@@ -256,7 +256,7 @@ struct ClientStates {
 
         Transition GetTransition() override {
             if (bn::keypad::start_pressed()) {
-                return SiblingTransition<HelloRtc>();
+                return SiblingTransition<StatusScene>();
             }
             return NoTransition();
         }
@@ -265,10 +265,10 @@ struct ClientStates {
             bn::core::update();
         }
 
-        DEFINE_HSM_STATE(Welcome)
+        DEFINE_HSM_STATE(WelcomeScene)
     };
 
-    struct HelloRtc : BaseState {
+    struct StatusScene : BaseState {
         bn::vector<bn::sprite_ptr, 128> text_sprites;
 
         void OnEnter() override {
@@ -323,7 +323,7 @@ struct ClientStates {
             if (bn::keypad::start_pressed() && (Owner().rtcStatus & 0x80)) {
                 return SiblingTransition<ResetScene>();
             } else if (bn::keypad::start_pressed()) {
-                return SiblingTransition<DateTimeScene>();
+                return SiblingTransition<WallClockScene>();
             }
             return NoTransition();
         }
@@ -332,10 +332,10 @@ struct ClientStates {
             bn::core::update();
         }
 
-        DEFINE_HSM_STATE(HelloRtc)
+        DEFINE_HSM_STATE(StatusScene)
     };
 
-    struct DateTimeScene : BaseState {
+    struct WallClockScene : BaseState {
         bn::vector<bn::sprite_ptr, 96> text_sprites;
         bn::vector<bn::sprite_ptr, 32> time_sprites;
 
@@ -374,7 +374,7 @@ struct ClientStates {
 
         Transition GetTransition() override {
             if (!bn::date::active() || !bn::time::active()) {
-                return SiblingTransition<HelloRtc>();
+                return SiblingTransition<StatusScene>();
             } else if (bn::keypad::select_pressed()) {
                 return SiblingTransition<ResetScene>();
             } else if (bn::keypad::start_pressed() && bn::date::active() && bn::time::active()) {
@@ -387,7 +387,7 @@ struct ClientStates {
             bn::core::update();
         }
 
-        DEFINE_HSM_STATE(DateTimeScene)
+        DEFINE_HSM_STATE(WallClockScene)
     };
 
     struct EditScene : BaseState {
@@ -556,9 +556,9 @@ struct ClientStates {
         Transition GetTransition() override {
             if (bn::keypad::start_pressed()) {
                 SaveTime();
-                return SiblingTransition<DateTimeScene>();
+                return SiblingTransition<WallClockScene>();
             } else if (bn::keypad::select_pressed()) {
-                return SiblingTransition<DateTimeScene>();
+                return SiblingTransition<WallClockScene>();
             }
             return NoTransition();
         }
@@ -593,9 +593,9 @@ struct ClientStates {
         Transition GetTransition() override {
             if (bn::keypad::select_pressed()) {
                 RtcClient::resetChip();
-                return SiblingTransition<HelloRtc>();
+                return SiblingTransition<StatusScene>();
             } else if (bn::keypad::start_pressed()) {
-                return SiblingTransition<DateTimeScene>();
+                return SiblingTransition<WallClockScene>();
             }
             return NoTransition();
         }
@@ -609,7 +609,7 @@ struct ClientStates {
 };
 
 RtcClient::RtcClient() {
-    sm.Initialize<ClientStates::Welcome>(this);
+    sm.Initialize<ClientStates::WelcomeScene>(this);
 }
 
 int main() {
