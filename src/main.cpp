@@ -340,6 +340,9 @@ struct ClientStates {
         bn::vector<bn::sprite_ptr, 32> time_sprites;
 
         void OnEnter() override {
+            if (!bn::date::active() || !bn::time::active()) {
+                return;
+            }
             text_sprites.clear();
             text_generator.generate(0, -4 * 16, "Read Date and Time", text_sprites);
             if (bn::date::active() && bn::time::active()) {
@@ -352,28 +355,20 @@ struct ClientStates {
 
         void Update() override {
             bn::string<64> text;
+
+            if (bn::optional<bn::date> date = bn::date::current()) {
+                text = getDateString(text, date);
+            } else {
+                return;
+            }
+
+            if (bn::optional<bn::time> time = bn::time::current()) {
+                text = getTimeString(text, time);
+            } else {
+                return;
+            }
+
             time_sprites.clear();
-
-            if (bn::date::active()) {
-                if (bn::optional<bn::date> date = bn::date::current()) {
-                    text = getDateString(text, date);
-                } else {
-                    return;
-                }
-            } else {
-                return;
-            }
-
-            if (bn::time::active()) {
-                if (bn::optional<bn::time> time = bn::time::current()) {
-                    text = getTimeString(text, time);
-                } else {
-                    return;
-                }
-            } else {
-                return;
-            }
-
             text_generator.generate(0, 0, text, time_sprites);
         }
 
@@ -408,7 +403,8 @@ struct ClientStates {
         bn::string<32> readLine;
         int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, dow = 0;
         int dowOffset = 0;
-        bn::vector<bn::sprite_ptr, 64> text_sprites;
+        bn::vector<bn::sprite_ptr, 96> text_sprites;
+        bn::vector<bn::sprite_ptr, 32> time_sprites;
 
         void ReadFromRTC() {
             bn::optional<bn::date> dateOpt = bn::date::current();
@@ -428,10 +424,11 @@ struct ClientStates {
 
         void OnEnter() override {
             text_sprites.clear();
+            time_sprites.clear();
             ReadFromRTC();
             renderLine();
             text_generator.generate(0, -4 * 16, "RTC Edit", text_sprites);
-            text_generator.generate(0, 0 * 16, readLine, text_sprites);
+            text_generator.generate(0, 0 * 16, readLine, time_sprites);
             text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
             text_generator.generate(0, +4 * 16, "START: save", text_sprites);
         }
@@ -551,11 +548,8 @@ struct ClientStates {
             }
             if (dirty) {
                 renderLine();
-                text_sprites.clear();
-                text_generator.generate(0, -4 * 16, "RTC Edit", text_sprites);
-                text_generator.generate(0, +0 * 16, readLine, text_sprites);
-                text_generator.generate(0, +3 * 16, "SELECT: return", text_sprites);
-                text_generator.generate(0, +4 * 16, "START: save", text_sprites);
+                time_sprites.clear();
+                text_generator.generate(0, 0 * 16, readLine, time_sprites);
             }
         }
 
