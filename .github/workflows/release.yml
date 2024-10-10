@@ -34,7 +34,7 @@ jobs:
     name: Build GBA ROM and add it to the release
     needs: create-release
     container:
-      image: niceluigi/apotris-dka
+      image: niceluigi/wf-gba
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
