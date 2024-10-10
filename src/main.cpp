@@ -12,6 +12,10 @@
 #include "agbabi.h"
 #include "bn_sprite_text_generator.h"
 #include "bn_music_items.h"
+#include "bn_sprite_items_full.h"
+#include "bn_sprite_items_dead.h"
+#include "bn_sprite_items_missing.h"
+#include "bn_sprite_items_error.h"
 
 #include "common_info.h"
 #include "common_variable_8x16_sprite_font.h"
@@ -19,9 +23,13 @@
 #include "hsm.h"
 
 alignas(int) __attribute__((used)) const char save_type[] = "FLASH1M_V102";
+alignas(int) __attribute__((used)) const char rtc_hint[] = "SIIRTC_V001";
 
 const char *init() {
-    return save_type;
+    if (rtc_hint && save_type)
+        return rtc_hint;
+    else
+        return nullptr;
 }
 
 class TimeFormatter {
@@ -90,6 +98,7 @@ public:
 #define REG_DAT *((volatile uint16_t *)0x080000C4)
 #define REG_DIR *((volatile uint16_t *)0x080000C6)
 #define REG_CTL *((volatile uint16_t *)0x080000C8)
+#define REG_NAM ((volatile uint16_t *)0x080000A0)
 
 // We mask 0x60 here and/or add 1 to the LSB to indicate R/W intent
 #define MASK_READ(x) (((x)<<1) | 0x61)
@@ -123,6 +132,7 @@ private:
     friend struct ClientStates;
     unsigned short rtcStatus = 0;
     bool rtcFail = false;
+    bn::string<12> lastSeenGameCode;
 
     /**
      * Will set up the RTC module to read or write from other methods.
@@ -295,6 +305,54 @@ private:
 
 };
 
+bool isPrintable(int c)
+{
+    return ' ' <= c && c <= '~';
+}
+
+bn::vector<char, 12>& truncate_to_last_printable(bn::vector<char, 12>& vec) {
+    if (vec.empty()) {
+        return vec;
+    }
+
+    auto last_printable = vec.end();
+
+    for (auto it = vec.begin(); it != vec.end(); ++it) {
+        if (isPrintable(static_cast<unsigned char>(*it))) {
+            last_printable = it;
+        } else {
+            break;
+        }
+    }
+
+    if (last_printable != vec.end()) {
+        vec.erase(std::next(last_printable), vec.end());
+    } else {
+        vec.clear();
+    }
+
+    return vec;
+}
+
+bn::string<12> getGameString() {
+    bn::vector<char, 12> gametitle;
+
+    for (int i = 0; i < 6; ++i) {
+        uint16_t word = *(REG_NAM + i);
+        gametitle.push_back(static_cast<char>(word & 0xFF));
+        gametitle.push_back(static_cast<char>((word >> 8) & 0xFF));
+    }
+
+    gametitle = truncate_to_last_printable(gametitle);
+
+    bn::string<12> result = "";
+    for (char c : gametitle) {
+        result += c;
+    }
+
+    return result;
+}
+
 bn::string<64> &getTimeString(bn::string<64> &text, const bn::optional<bn::time> &time, bool twelveHourMode) {
     int stagingHour = time->hour();
     if (twelveHourMode) {
@@ -359,8 +417,36 @@ bn::string<64> &getDateString(bn::string<64> &text, const bn::optional<bn::date>
     return text;
 }
 
+bn::optional<bn::sprite_ptr> sprite;
+
 struct ClientStates {
     struct BaseState : StateWithOwner<RtcClient> {
+
+        void pollStatusSprite() {
+            // If we've already checked this one don't re-check
+            if (Owner().lastSeenGameCode == getGameString()) {
+                return;
+            }
+            Owner().lastSeenGameCode = getGameString();
+            Owner().rtcStatus = RtcClient::readStatus();
+            const int x = -108, y = -64;
+            if (Owner().rtcStatus == 0xFF) {
+                sprite = bn::sprite_items::missing.create_sprite_optional(x, y);
+            } else if (Owner().rtcStatus & 0x80 && Owner().rtcStatus != 0x82) {
+                sprite = bn::sprite_items::dead.create_sprite_optional(x, y);
+            } else if (Owner().rtcStatus == 0x82 || Owner().rtcStatus == 0x40) {
+                sprite = bn::sprite_items::full.create_sprite_optional(x, y);
+            } else {
+                // no status is suspicious
+                auto datetime = __agbabi_rtc_datetime();
+                // Check if date has any data (blank is a fault state)
+                if (!datetime[1]) {
+                    sprite = bn::sprite_items::error.create_sprite_optional(x, y);
+                    return;
+                }
+                sprite = bn::sprite_items::full.create_sprite_optional(x, y);
+            }
+        }
     };
 
     struct WelcomeScene : BaseState {
@@ -375,6 +461,10 @@ struct ClientStates {
             text_generator.generate(0, +2 * 16, "Built with Butano, made by @aronson", text_sprites);
             text_generator.generate(0, +3 * 16, "Music Credit: Nighthawk - Trams.xm", text_sprites);
             text_generator.generate(0, +4 * 16, "START: query RTC module", text_sprites);
+        }
+
+        void Update() override {
+            pollStatusSprite();
         }
 
         Transition GetTransition() override {
@@ -397,26 +487,34 @@ struct ClientStates {
         void OnEnter() override {
             text_sprites.clear();
             text_generator.generate(0, -4 * 16, "Negotiation with RTC module", text_sprites);
-            int checkValue = RtcClient::readStatus();
 
+            // Update owner state
+            pollStatusSprite();
             // Report on result
+            bn::string<23> gameCode = "Game code: ";
             bn::string<64> text;
             bn::string<64> additional;
             bn::string<64> additional2;
             bn::string<64> nextSteps;
+            auto code = Owner().lastSeenGameCode;
+            if (code.empty()) {
+                gameCode = "";
+                additional = "Cart not plugged?";
+            } else {
+                gameCode += code;
+            }
             int offset = 0;
+            int checkValue = Owner().rtcStatus;
             Owner().rtcFail = false;
             if (checkValue == 0xFF) {
-                text = "RTC chip returned only noise.";
-                additional = "Cart not plugged?";
+                text = "Cart bus returned only noise.";
                 additional2 = "Inaccurate/misconfigured emu?";
                 nextSteps = "START: proceed to attempt reset";
-                offset = -1;
             } else if (checkValue == 0x82) {
                 text = "RTC chip is in factory state.";
                 nextSteps = "START: proceed to initialize";
             } else if (checkValue & 0x80) {
-                text = "RTC chip battery is (likely) dead.";
+                text = "RTC chip battery reports dead; chip functional.";
                 nextSteps = "START: proceed to attempt init";
             } else if (checkValue & 0x40) {
                 text = "RTC chip is in 24 hour mode.";
@@ -436,10 +534,13 @@ struct ClientStates {
                     nextSteps = "START: proceed to read date & time";
                 }
             }
-            Owner().rtcStatus = checkValue;
-            text_generator.generate(0, (-0 + offset) * 16, text, text_sprites);
-            text_generator.generate(0, (+1 + offset) * 16, additional, text_sprites);
-            text_generator.generate(0, (+2 + offset) * 16, additional2, text_sprites);
+            if (checkValue & 0x80) {
+                text_generator.generate(0, -2 * 16, "Power flag high: battery dead?", text_sprites);
+            }
+            text_generator.generate(0, -1 * 16, gameCode, text_sprites);
+            text_generator.generate(0, -0 * 16, text, text_sprites);
+            text_generator.generate(0, +1 * 16, additional, text_sprites);
+            text_generator.generate(0, +2 * 16, additional2, text_sprites);
             text_generator.generate(0, +3 * 16, "SELECT: back to hotswap screen", text_sprites);
             text_generator.generate(0, +4 * 16, nextSteps, text_sprites);
         }
@@ -455,6 +556,10 @@ struct ClientStates {
             return NoTransition();
         }
 
+        void Update() override {
+            pollStatusSprite();
+        }
+
         void OnExit() override {
             bn::core::update();
         }
@@ -466,7 +571,6 @@ struct ClientStates {
         bn::vector<bn::sprite_ptr, 64> text_sprites;
         bn::vector<bn::sprite_ptr, 33> afternoon_sprites;
         bn::vector<bn::sprite_ptr, 31> time_sprites;
-        bool workedOnce = false;
         int status = 0;
 
         void OnEnter() override {
@@ -476,7 +580,6 @@ struct ClientStates {
                 Owner().rtcFail = true;
                 return;
             }
-            workedOnce = true;
             render();
         }
 
@@ -535,16 +638,12 @@ struct ClientStates {
 
             time_sprites.clear();
             text_generator.generate(0, 0, text, time_sprites);
+            pollStatusSprite();
         }
 
         Transition GetTransition() override {
             if (Owner().rtcFail) {
-                if (workedOnce) {
-                    // Hotswap
-                    return SiblingTransition<WelcomeScene>();
-                } else {
-                    return SiblingTransition<StatusScene>();
-                }
+                return SiblingTransition<StatusScene>();
             } else if (bn::keypad::select_pressed()) {
                 return SiblingTransition<ResetScene>();
             } else if (bn::keypad::start_pressed() && bn::date::active() && bn::time::active()) {
@@ -688,6 +787,7 @@ struct ClientStates {
                 time_sprites.clear();
                 text_generator.generate(0, 0 * 16, readLine, time_sprites);
             }
+            pollStatusSprite();
         }
 
         Transition GetTransition() override {
@@ -729,6 +829,10 @@ struct ClientStates {
             text_generator.generate(0, +3 * 16, Owner().rtcStatus == 0x82 ? "SELECT: send init" : "SELECT: send reset",
                                     text_sprites);
             text_generator.generate(0, +4 * 16, "START: force read RTC", text_sprites);
+        }
+
+        void Update() override {
+            pollStatusSprite();
         }
 
         Transition GetTransition() override {
