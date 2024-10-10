@@ -22,8 +22,8 @@
 
 #include "hsm.h"
 
-alignas(int) __attribute__((used)) const char save_type[] = "FLASH1M_V102";
-alignas(int) __attribute__((used)) const char rtc_hint[] = "SIIRTC_V001";
+alignas(int) __attribute__((used)) const char save_type[] = "FLASH1M_V102\0";
+alignas(int) __attribute__((used)) const char rtc_hint[] = "SIIRTC_V001\0";
 
 const char *init() {
     if (rtc_hint && save_type)
@@ -497,13 +497,12 @@ struct ClientStates {
             bn::string<64> additional2;
             bn::string<64> nextSteps;
             auto code = Owner().lastSeenGameCode;
-            if (code.empty()) {
+            if (code.empty() || code == bn::to_string<1>("P")) {
                 gameCode = "";
                 additional = "Cart not plugged?";
             } else {
                 gameCode += code;
             }
-            int offset = 0;
             int checkValue = Owner().rtcStatus;
             Owner().rtcFail = false;
             if (checkValue == 0xFF) {
@@ -527,7 +526,6 @@ struct ClientStates {
                     additional = "Cart has no RTC?";
                     additional2 = "Inaccurate/misconfigured emu?";
                     nextSteps = "START: proceed to attempt init";
-                    offset = -1;
                     Owner().rtcFail = true;
                 } else {
                     text = "RTC chip is in 12 hour mode.";
@@ -541,7 +539,7 @@ struct ClientStates {
             text_generator.generate(0, -0 * 16, text, text_sprites);
             text_generator.generate(0, +1 * 16, additional, text_sprites);
             text_generator.generate(0, +2 * 16, additional2, text_sprites);
-            text_generator.generate(0, +3 * 16, "SELECT: back to hotswap screen", text_sprites);
+            text_generator.generate(0, +3 * 16, "SELECT: back to hot-swap screen", text_sprites);
             text_generator.generate(0, +4 * 16, nextSteps, text_sprites);
         }
 
@@ -587,7 +585,7 @@ struct ClientStates {
             text_sprites.clear();
             text_generator.generate(0, -4 * 16, "Read Date and Time", text_sprites);
             if (bn::date::active() && bn::time::active()) {
-                text_generator.generate(0, -2 * 16, "You can hotswap on this screen!", text_sprites);
+                text_generator.generate(0, -2 * 16, "You can hot-swap on this screen!", text_sprites);
                 text_generator.generate(0, +3 * 16, "SELECT: reset (will confirm first)", text_sprites);
                 text_generator.generate(0, +4 * 16, "START: edit (saves current time)", text_sprites);
             } else {
