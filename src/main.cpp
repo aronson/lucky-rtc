@@ -429,6 +429,7 @@ struct ClientStates {
             }
             Owner().lastSeenGameCode = getGameString();
             Owner().rtcStatus = RtcClient::readStatus();
+            Owner().rtcFail = Owner().rtcStatus & 0x80;
             const int x = -108, y = -64;
             if (Owner().rtcStatus == 0xFF) {
                 sprite = bn::sprite_items::missing.create_sprite_optional(x, y);
