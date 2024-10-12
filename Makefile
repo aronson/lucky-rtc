@@ -40,10 +40,10 @@ AUDIO       	:=  audio
 DMGAUDIO    	:=  
 ROMTITLE    	:=  LUCKY RTC
 ROMCODE     	:=  3RTC
-USERFLAGS   	:=  -flto -Oz
-USERCXXFLAGS	:= 
+USERFLAGS   	:=  -flto -Oz 
+USERCXXFLAGS	:=  
 USERASFLAGS 	:=  
-USERLDFLAGS 	:=  -flto=2
+USERLDFLAGS 	:=  -flto=2 -Wl,--print-memory-usage
 USERLIBDIRS 	:=  
 USERLIBS    	:=  
 DEFAULTLIBS 	:=  
